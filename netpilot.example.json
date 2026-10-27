@@ -1,0 +1,27 @@
+{
+  "channels": {
+    "direct": "以太网",
+    "fastorange": "本地连接 2",
+    "company": "本地连接"
+  },
+  "default_channel": "direct",
+  "process_rules": [
+    {"process": "openvpn.exe", "channel": "direct", "enabled": true},
+    {"process": "FastOrange.exe", "channel": "direct", "enabled": true},
+    {"process": "SecoClient.exe", "channel": "direct", "enabled": true},
+    {"process": "SecoClientCS.exe", "channel": "direct", "enabled": true},
+    {"process": "SecoClientPromoteService.exe", "channel": "direct", "enabled": true},
+    {"process": "aTrustAgent.exe", "channel": "direct", "enabled": true},
+    {"process": "aTrustXtunnel.exe", "channel": "direct", "enabled": true},
+    {"process": "ECAgent.exe", "channel": "direct", "enabled": true},
+    {"process": "SangforPromoteService.exe", "channel": "direct", "enabled": true},
+    {"process": "SangforPW.exe", "channel": "direct", "enabled": true},
+    {"process": "chrome.exe", "channel": "fastorange", "enabled": true}
+  ],
+  "domain_rules": [
+    {"suffix": "google.com", "channel": "fastorange", "enabled": true}
+  ],
+  "dns": {"direct": "223.5.5.5", "fastorange": "8.8.8.8"},
+  "tun": {"interface_name": "NetPilot", "address": "172.19.0.1/30", "mtu": 1500, "stack": "gvisor"},
+  "log_level": "info"
+}

@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime state (personal settings, tokens, logs)
+data/
+logs/
+
+# sing-box binaries (download via scripts/download_core.ps1)
+core/*
+!core/README.md
+
+# OS / editor
+Thumbs.db
+Desktop.ini
+.vscode/
+.idea/
+
+# Misc
+*.zip
