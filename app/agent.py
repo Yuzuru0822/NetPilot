@@ -259,8 +259,12 @@ class Handler(BaseHTTPRequestHandler):
             # Replace the running agent with one using the latest code.
             # The child inherits this process's elevation, so no new UAC prompt.
             CORE.stop()
-            subprocess.Popen([sys.executable, "-m", "app.agent"],
-                             cwd=str(paths.ROOT), creationflags=subprocess.CREATE_NO_WINDOW)
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable], cwd=str(paths.ROOT),
+                                 creationflags=subprocess.CREATE_NO_WINDOW)
+            else:
+                subprocess.Popen([sys.executable, "-m", "app.agent"],
+                                 cwd=str(paths.ROOT), creationflags=subprocess.CREATE_NO_WINDOW)
             self._send({"ok": True, "message": "reloading agent"})
             _delayed_exit()
         elif self.path == "/shutdown":

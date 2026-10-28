@@ -1,5 +1,5 @@
 $ErrorActionPreference = 'Stop'
-$root = 'D:\NetPilot'
+$root = Split-Path -Parent $PSScriptRoot
 $desktop = [Environment]::GetFolderPath('Desktop')
 $lnkPath = Join-Path $desktop 'NetPilot.lnk'
 $ws = New-Object -ComObject WScript.Shell

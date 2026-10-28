@@ -1,7 +1,7 @@
 # NetPilot Autostart installer (run once as administrator).
 # Registers the privileged agent to start at logon; no UAC prompt afterwards.
 $taskName = 'NetPilot Agent'
-$root = 'D:\NetPilot'
+$root = Split-Path -Parent $PSScriptRoot
 $pythonw = Join-Path $root '.venv\Scripts\pythonw.exe'
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument '-m app.agent' -WorkingDirectory $root
 $trigger = New-ScheduledTaskTrigger -AtLogOn

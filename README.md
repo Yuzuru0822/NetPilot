@@ -12,6 +12,16 @@
 
 工作目录：`D:\NetPilot`（配置 `data\netpilot.json`、生成的内核配置 `data\singbox.json`、日志 `logs\`）。
 
+## 从 Release 下载使用（无需 Python）
+
+到 [Releases](https://github.com/Yuzuru0822/NetPilot/releases) 下载 `NetPilot-vX.Y.Z-win64.zip`，解压到任意目录（建议 `D:\NetPilot`，与脚本默认兼容），然后：
+
+1. 双击 `NetPilot.exe` 打开界面；
+2. 顶部点"启动核心服务（管理员）"，UAC 点"是"（每次开机首次需要）；
+3. 点"启动分流"，在"分流规则"页签给程序分配通道。
+
+发布包内含：`NetPilot.exe`（界面）、`NetPilotAgent.exe`（核心服务）、sing-box 1.14.4 内核、全部控制脚本。系统要求 Windows 10/11 x64，**无需安装 Python**。
+
 ## 从仓库重新部署
 
 ```powershell
