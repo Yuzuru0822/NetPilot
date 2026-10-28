@@ -21,15 +21,6 @@ from .agent_client import AgentClient, AgentOffline, ClashClient
 from .config_builder import generate, load_settings, save_settings
 from .netinfo import list_adapters, list_processes
 
-CHANNELS = [("direct", "公网直连"), ("fastorange", "快橙·国际"), ("company", "公司内网")]
-CHANNEL_LABEL = dict(CHANNELS)
-CHANNEL_TAGS = [tag for tag, _ in CHANNELS]
-
-
-def channel_label(tag: str) -> str:
-    return CHANNEL_LABEL.get(tag, tag)
-
-
 def make_icon() -> QIcon:
     pix = QPixmap(64, 64)
     pix.fill(Qt.transparent)
@@ -126,6 +117,7 @@ class MainWindow(QMainWindow):
         self.agent = AgentClient()
         self.clash = ClashClient()
         self.settings = load_settings()
+        self._channel_rows = []
         self.core_running = False
         self.agent_online = False
         self._tasks = set()
@@ -162,6 +154,16 @@ class MainWindow(QMainWindow):
         self.refresh_vpn_states()
 
     # ---------- infrastructure ----------
+    def name_map(self) -> dict:
+        """Channel id -> display name, preferring the live channel table so
+        renames in progress are reflected everywhere immediately."""
+        if getattr(self, "_channel_rows", None):
+            return {row["id"]: row["name_item"].text() for row in self._channel_rows}
+        return {ch["id"]: ch["name"] for ch in self.settings["channels"]}
+
+    def channel_label(self, tag: str) -> str:
+        return self.name_map().get(tag, tag)
+
     def run_task(self, fn, on_done=None, on_error=None):
         task = Task(fn)
         self._tasks.add(task)
@@ -225,12 +227,10 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if hasattr(self, "process_table"):
             self.settings = load_settings()
+            self._rebuild_channel_table()
             self._fill_rule_table(self.process_table, self.settings.get("process_rules", []), "process")
             self._fill_rule_table(self.domain_table, self.settings.get("domain_rules", []), "suffix")
-            for tag, combo in self.channel_combos.items():
-                combo.setCurrentText(self.settings["channels"].get(tag, ""))
-            default_tag = self.settings.get("default_channel", "direct")
-            self.default_combo.setCurrentIndex(CHANNEL_TAGS.index(default_tag) if default_tag in CHANNEL_TAGS else 0)
+            self._fill_channel_combo(self.default_combo, self.settings.get("default_channel", "direct"))
 
     def _tab_changed(self, index):
         if index == 1:
@@ -296,34 +296,28 @@ class MainWindow(QMainWindow):
         default_row = QHBoxLayout()
         default_row.addWidget(QLabel("未匹配规则的流量走默认通道："))
         self.default_combo = QComboBox()
-        self.default_combo.addItems([label for _, label in CHANNELS])
-        default_tag = self.settings.get("default_channel", "direct")
-        self.default_combo.setCurrentIndex(CHANNEL_TAGS.index(default_tag) if default_tag in CHANNEL_TAGS else 0)
         default_row.addWidget(self.default_combo)
         default_row.addStretch()
         layout.addLayout(default_row)
 
-        channel_group = QGroupBox("通道 → 网卡绑定")
+        channel_group = QGroupBox("通道 → 网卡绑定（名称可双击重命名，规则与默认通道同步更新）")
         channel_layout = QVBoxLayout(channel_group)
-        self.channel_table = QTableWidget(len(CHANNELS), 3)
-        self.channel_table.setHorizontalHeaderLabels(["通道", "绑定网卡（可下拉或手动输入）", "网卡状态"])
+        self.channel_table = QTableWidget(0, 4)
+        self.channel_table.setHorizontalHeaderLabels(["通道名称", "绑定网卡（可下拉或手动输入）", "网卡状态", ""])
         self.channel_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.channel_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
-        self.channel_table.setColumnWidth(0, 110)
+        self.channel_table.setColumnWidth(0, 150)
+        self.channel_table.setColumnWidth(3, 46)
         self.channel_table.verticalHeader().setVisible(False)
-        self.channel_table.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.channel_table.setMaximumHeight(175)
-        self.channel_combos: dict[str, QComboBox] = {}
-        for row, (tag, label) in enumerate(CHANNELS):
-            self.channel_table.setItem(row, 0, QTableWidgetItem(label))
-            combo = QComboBox()
-            combo.setEditable(True)
-            combo.setCurrentText(self.settings["channels"].get(tag, ""))
-            self.channel_combos[tag] = combo
-            self.channel_table.setCellWidget(row, 1, combo)
-            self.channel_table.setItem(row, 2, QTableWidgetItem("检测中…"))
+        self.channel_table.setMaximumHeight(200)
+        self.channel_table.itemChanged.connect(lambda _item: self._sync_channel_names())
         channel_layout.addWidget(self.channel_table)
+        new_channel_btn = QPushButton("＋ 新建通道")
+        new_channel_btn.clicked.connect(self.add_channel)
+        channel_layout.addWidget(new_channel_btn, alignment=Qt.AlignLeft)
         layout.addWidget(channel_group)
+        self._rebuild_channel_table()
+        self._fill_channel_combo(self.default_combo, self.settings.get("default_channel", "direct"))
 
         self.process_group, self.process_table = self._make_rule_group(
             "进程规则（按 exe 名称匹配，自上而下生效）", ["启用", "进程名", "通道"])
@@ -377,10 +371,8 @@ class MainWindow(QMainWindow):
             table.setCellWidget(row, 0, enabled)
             table.setItem(row, 1, QTableWidgetItem(rule[key]))
             combo = QComboBox()
-            combo.addItems([label for _, label in CHANNELS])
-            if rule["channel"] in CHANNEL_TAGS:
-                combo.setCurrentIndex(CHANNEL_TAGS.index(rule["channel"]))
             table.setCellWidget(row, 2, combo)
+            self._fill_channel_combo(combo, rule["channel"])
 
     def add_process_rule(self):
         picker = ProcessPicker(self)
@@ -413,7 +405,7 @@ class MainWindow(QMainWindow):
             rules.append({
                 "enabled": enabled.isChecked() if enabled else True,
                 key: item.text().strip(),
-                "channel": CHANNEL_TAGS[combo.currentIndex()],
+                "channel": combo.currentData(),
             })
         return rules
 
@@ -440,14 +432,120 @@ class MainWindow(QMainWindow):
                 self._fill_rule_table(table, rules, key)
                 table.selectRow(target)
 
+    def _append_channel_row(self, channel: dict) -> None:
+        row = len(self._channel_rows)
+        self.channel_table.insertRow(row)
+        name_item = QTableWidgetItem(channel["name"])
+        name_item.setData(Qt.UserRole, channel["id"])
+        self.channel_table.setItem(row, 0, name_item)
+        iface_combo = QComboBox()
+        iface_combo.setEditable(True)
+        iface_combo.setCurrentText(channel.get("interface", ""))
+        self.channel_table.setCellWidget(row, 1, iface_combo)
+        self.channel_table.setItem(row, 2, QTableWidgetItem("检测中…"))
+        delete_btn = QPushButton("✕")
+        delete_btn.setToolTip("删除此通道（被规则使用或为默认通道时不可删）")
+        delete_btn.setMaximumWidth(46)
+        delete_btn.clicked.connect(lambda _=False, cid=channel["id"]: self.delete_channel(cid))
+        self.channel_table.setCellWidget(row, 3, delete_btn)
+        self._channel_rows.append({"id": channel["id"], "name_item": name_item, "iface_combo": iface_combo})
+        self.refresh_adapters()
+
+    def _rebuild_channel_table(self) -> None:
+        self.channel_table.blockSignals(True)
+        self.channel_table.setRowCount(0)
+        self._channel_rows = []
+        for channel in self.settings["channels"]:
+            self._append_channel_row(channel)
+        self.channel_table.blockSignals(False)
+
+    def _fill_channel_combo(self, combo: QComboBox, selected_id) -> None:
+        combo.blockSignals(True)
+        combo.clear()
+        for row in self._channel_rows:
+            combo.addItem(row["name_item"].text(), row["id"])
+        index = combo.findData(selected_id)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.blockSignals(False)
+
+    def _refresh_all_combos(self) -> None:
+        self._fill_channel_combo(self.default_combo, self.default_combo.currentData())
+        for table in (self.process_table, self.domain_table):
+            for row in range(table.rowCount()):
+                combo = table.cellWidget(row, 2)
+                if combo:
+                    self._fill_channel_combo(combo, combo.currentData())
+
+    def _sync_channel_names(self) -> None:
+        """After a rename, update every dropdown's display text in place."""
+        names = self.name_map()
+
+        def relabel(combo):
+            for i in range(combo.count()):
+                cid = combo.itemData(i)
+                combo.setItemText(i, names.get(cid, cid))
+
+        relabel(self.default_combo)
+        for table in (self.process_table, self.domain_table):
+            for row in range(table.rowCount()):
+                combo = table.cellWidget(row, 2)
+                if combo:
+                    relabel(combo)
+
+    def add_channel(self) -> None:
+        existing = {row["id"] for row in self._channel_rows}
+        n = 1
+        while f"ch{n}" in existing:
+            n += 1
+        self._append_channel_row({"id": f"ch{n}", "name": f"新通道{n}", "interface": ""})
+        self._refresh_all_combos()
+        self.statusBar().showMessage("已添加新通道：请重命名、选择绑定网卡，然后点“保存并应用”。", 10000)
+
+    def delete_channel(self, channel_id: str) -> None:
+        if len(self._channel_rows) <= 1:
+            QMessageBox.warning(self, "无法删除", "至少需要保留一个通道。")
+            return
+        if self.default_combo.currentData() == channel_id:
+            QMessageBox.warning(self, "无法删除", "该通道正在作为默认通道使用，请先更换默认通道。")
+            return
+        used_by = []
+        for table in (self.process_table, self.domain_table):
+            for row in range(table.rowCount()):
+                combo = table.cellWidget(row, 2)
+                if combo and combo.currentData() == channel_id:
+                    used_by.append(table.item(row, 1).text())
+        if used_by:
+            QMessageBox.warning(self, "无法删除",
+                                "以下规则正在使用该通道，请先修改或删除这些规则：\n" + "\n".join(used_by))
+            return
+        index = next(i for i, row in enumerate(self._channel_rows) if row["id"] == channel_id)
+        self.channel_table.blockSignals(True)
+        self.channel_table.removeRow(index)
+        self._channel_rows.pop(index)
+        self.channel_table.blockSignals(False)
+        self._refresh_all_combos()
+        self.statusBar().showMessage("通道已删除，点“保存并应用”生效。", 8000)
+
     def apply_settings(self, start_only=False):
-        self.settings["default_channel"] = CHANNEL_TAGS[self.default_combo.currentIndex()]
-        for tag, combo in self.channel_combos.items():
-            self.settings["channels"][tag] = combo.currentText().strip()
+        channels = []
+        for row in self._channel_rows:
+            name = row["name_item"].text().strip() or row["id"]
+            channels.append({
+                "id": row["id"],
+                "name": name,
+                "interface": row["iface_combo"].currentText().strip(),
+            })
+        missing = [c["name"] for c in channels if not c["interface"]]
+        if missing:
+            QMessageBox.warning(self, "无法应用", "以下通道还没有绑定网卡：\n" + "\n".join(missing))
+            return
+        self.settings["channels"] = channels
+        self.settings["default_channel"] = self.default_combo.currentData()
         self.settings["process_rules"] = self._read_rule_table(self.process_table, "process")
         self.settings["domain_rules"] = self._read_rule_table(self.domain_table, "suffix")
         save_settings(self.settings)
         generate()
+        self._refresh_all_combos()
 
         def work():
             if self.core_running and not start_only:
@@ -507,6 +605,7 @@ class MainWindow(QMainWindow):
         if connections is None:
             return
         now = time.time()
+        ids = set(self.name_map())
         rows = []
         current_ids = set()
         for conn in connections:
@@ -522,7 +621,7 @@ class MainWindow(QMainWindow):
             host = meta.get("host") or meta.get("destinationIP") or ""
             target = f"{host}:{meta.get('destinationPort', '')}"
             chains = conn.get("chains") or []
-            channel = next((c for c in chains if c in CHANNEL_TAGS), chains[0] if chains else "?")
+            channel = next((c for c in chains if c in ids), chains[0] if chains else "?")
             rows.append({
                 "process": process, "target": target, "channel": channel,
                 "rule": f"{conn.get('rule', '')} {conn.get('rulePayload', '')}".strip(),
@@ -536,7 +635,7 @@ class MainWindow(QMainWindow):
         self.conn_table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             values = [
-                row["process"], row["target"], channel_label(row["channel"]), row["rule"],
+                row["process"], row["target"], self.channel_label(row["channel"]), row["rule"],
                 self._fmt_rate(row["down_rate"]), self._fmt_rate(row["up_rate"]),
                 f"{self._fmt_bytes(row['down'])} / {self._fmt_bytes(row['up'])}",
             ]
@@ -646,7 +745,8 @@ class MainWindow(QMainWindow):
         def done(adapters):
             self._adapters = adapters
             names = [a["name"] for a in adapters]
-            for tag, combo in self.channel_combos.items():
+            for row in self._channel_rows:
+                combo = row["iface_combo"]
                 current = combo.currentText()
                 combo.clear()
                 combo.addItems(names)
@@ -656,8 +756,8 @@ class MainWindow(QMainWindow):
                 self.adapter_table.setItem(i, 0, QTableWidgetItem(adapter["name"]))
                 self.adapter_table.setItem(i, 1, QTableWidgetItem("🟢 在线" if adapter["is_up"] else "⚪ 离线"))
                 self.adapter_table.setItem(i, 2, QTableWidgetItem(", ".join(adapter["ipv4"])))
-            for row, (tag, _) in enumerate(CHANNELS):
-                bound = self.channel_combos[tag].currentText()
+            for i, row in enumerate(self._channel_rows):
+                bound = row["iface_combo"].currentText()
                 match = next((a for a in adapters if a["name"] == bound), None)
                 if match and match["is_up"]:
                     text = "🟢 " + (", ".join(match["ipv4"]) or "在线")
@@ -665,7 +765,7 @@ class MainWindow(QMainWindow):
                     text = "⚪ 离线/未找到"
                 else:
                     text = "未绑定"
-                self.channel_table.setItem(row, 2, QTableWidgetItem(text))
+                self.channel_table.setItem(i, 2, QTableWidgetItem(text))
 
         self.run_task(work, done)
 

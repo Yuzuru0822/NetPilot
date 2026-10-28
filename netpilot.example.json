@@ -1,9 +1,9 @@
 {
-  "channels": {
-    "direct": "以太网",
-    "fastorange": "本地连接 2",
-    "company": "本地连接"
-  },
+  "channels": [
+    {"id": "direct", "name": "公网直连", "interface": "以太网"},
+    {"id": "fastorange", "name": "快橙·国际", "interface": "本地连接 2"},
+    {"id": "company", "name": "公司内网", "interface": "本地连接"}
+  ],
   "default_channel": "direct",
   "process_rules": [
     {"process": "openvpn.exe", "channel": "direct", "enabled": true},

@@ -18,7 +18,13 @@ from pathlib import Path
 from . import paths
 
 DEFAULT_SETTINGS: dict = {
-    "channels": {"direct": "以太网", "fastorange": "本地连接 2"},
+    # Channel list is ordered; each channel has a stable internal `id` used in
+    # sing-box config and rules, plus a user-editable display `name`.
+    "channels": [
+        {"id": "direct", "name": "公网直连", "interface": "以太网"},
+        {"id": "fastorange", "name": "快橙·国际", "interface": "本地连接 2"},
+        {"id": "company", "name": "公司内网", "interface": "本地连接"},
+    ],
     "default_channel": "direct",
     # VPN clients' own tunnel traffic must always use the physical adapter,
     # otherwise the TUN can cause reconnect loops.
@@ -67,12 +73,30 @@ def _make_dns_server(tag: str, conf, detour: str) -> dict:
     return entry
 
 
+CHANNEL_NAMES = {"direct": "公网直连", "fastorange": "快橙·国际", "company": "公司内网"}
+
+
+def _migrate_channels(raw) -> list[dict]:
+    """Accept the legacy {tag: interface} mapping and upgrade it to the
+    list-of-channels format, keeping ids stable so rules keep working."""
+    if isinstance(raw, dict):
+        return [
+            {"id": tag, "name": CHANNEL_NAMES.get(tag, tag), "interface": iface}
+            for tag, iface in raw.items()
+        ]
+    return raw
+
+
 def load_settings() -> dict:
     if paths.SETTINGS_FILE.exists():
         with open(paths.SETTINGS_FILE, encoding="utf-8") as f:
             saved = json.load(f)
         merged = dict(DEFAULT_SETTINGS)
         merged.update(saved)
+        merged["channels"] = _migrate_channels(merged["channels"])
+        ids = [ch["id"] for ch in merged["channels"]]
+        if merged.get("default_channel") not in ids:
+            merged["default_channel"] = ids[0] if ids else "direct"
         return merged
     return dict(DEFAULT_SETTINGS)
 
@@ -83,7 +107,8 @@ def save_settings(settings: dict) -> None:
 
 
 def build_config(settings: dict) -> dict:
-    channels: dict[str, str] = settings["channels"]
+    channels: list[dict] = settings["channels"]
+    channel_ids = [ch["id"] for ch in channels]
     default_channel: str = settings["default_channel"]
     process_rules: list[dict] = settings.get("process_rules", [])
     domain_rules: list[dict] = settings.get("domain_rules", [])
@@ -92,7 +117,7 @@ def build_config(settings: dict) -> dict:
 
     dns_servers = []
     for tag, conf in dns_servers_conf.items():
-        if not conf or tag not in channels:
+        if not conf or tag not in channel_ids:
             continue
         dns_servers.append(_make_dns_server(tag, conf, tag))
     if not dns_servers:
@@ -102,8 +127,8 @@ def build_config(settings: dict) -> dict:
         return f"dns-{channel}" if any(s["tag"] == f"dns-{channel}" for s in dns_servers) else dns_servers[0]["tag"]
 
     outbounds = [
-        {"type": "direct", "tag": tag, "bind_interface": iface, "domain_resolver": dns_tag(tag)}
-        for tag, iface in channels.items()
+        {"type": "direct", "tag": ch["id"], "bind_interface": ch["interface"], "domain_resolver": dns_tag(ch["id"])}
+        for ch in channels
     ]
 
     dns_rules = []
