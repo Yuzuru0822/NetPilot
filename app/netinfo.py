@@ -5,7 +5,46 @@ here uses psutil / IP Helper API backed calls instead.
 """
 from __future__ import annotations
 
+import locale
+import re
+import subprocess
+
 import psutil
+
+NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
+
+def _ipconfig_text() -> str:
+    out = subprocess.run(["ipconfig", "/all"], capture_output=True,
+                         creationflags=NO_WINDOW)
+    return out.stdout.decode(locale.getpreferredencoding(False), errors="replace")
+
+
+def find_tap_adapter(ip_prefix: str) -> dict | None:
+    """Locate a TAP-Windows V9 adapter carrying an IPv4 in the given prefix.
+
+    Used to detect VPN state without UIA: FastOrange's tunnel always gets a
+    192.168.255.x/30 address, SecoClient's gets 192.168.220.x. Driver
+    descriptions are language independent, unlike adapter friendly names.
+    """
+    for block in re.split(r"\r?\n\r?\n", _ipconfig_text()):
+        if "TAP-Windows Adapter V9" not in block or ip_prefix not in block:
+            continue
+        match = re.search(r"IPv4[^\d]*(\d+\.\d+\.\d+\.\d+)", block)
+        if match:
+            return {"ip": match.group(1)}
+    return None
+
+
+def process_exists(exe_name: str) -> bool:
+    target = exe_name.lower()
+    for proc in psutil.process_iter(["name"]):
+        try:
+            if (proc.info["name"] or "").lower() == target:
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+    return False
 
 
 def list_adapters() -> list[dict]:

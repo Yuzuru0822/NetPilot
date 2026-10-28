@@ -699,7 +699,8 @@ class MainWindow(QMainWindow):
         self.run_task(vpn.seco_state, self._update_seco_state)
 
     def _update_fo_state(self, result):
-        state_map = {"connected": "🟢 已连接", "disconnected": "⚪ 已断开", "connecting": "🟡 连接中"}
+        state_map = {"connected": "🟢 已连接", "disconnected": "⚪ 已断开",
+                     "connecting": "🟡 连接中", "not_running": "⚪ 未运行"}
         self.fo_state.setText(state_map.get(result.get("state"), result.get("state", "未知")))
         self.fo_node.setText(result.get("node") or "-")
 

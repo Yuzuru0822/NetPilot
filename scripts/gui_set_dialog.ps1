@@ -1,7 +1,7 @@
 param([string]$Value)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$proc = Get-Process pythonw | Where-Object { $_.MainWindowTitle -like '*NetPilot*' } | Select-Object -First 1
+$proc = Get-Process pythonw,NetPilot -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*NetPilot*' } | Select-Object -First 1
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, 'QApplication.QInputDialog')
 $dialog = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $cond)

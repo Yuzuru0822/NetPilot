@@ -1,7 +1,7 @@
 param([string]$TabName = '实时连接', [string]$TitleMatch = 'NetPilot')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$proc = Get-Process pythonw | Where-Object { $_.MainWindowTitle -like "*$TitleMatch*" } | Select-Object -First 1
+$proc = Get-Process pythonw,NetPilot -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*$TitleMatch*" } | Select-Object -First 1
 if (-not $proc) { Write-Error "NetPilot window not found"; exit 1 }
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
 $cond = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $TabName)

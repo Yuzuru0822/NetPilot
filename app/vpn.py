@@ -1,12 +1,21 @@
-"""FastOrange / SecoClient automation wrappers (UIA via PowerShell scripts)."""
+"""FastOrange / SecoClient automation wrappers (UIA via PowerShell scripts).
+
+State detection is two-layered: UIA reads the client window for details
+(node name, login prompts), and a TAP-adapter check (192.168.255.x for
+FastOrange, 192.168.220.x for SecoClient) provides a version/language-proof
+fallback so state never degrades to "unknown" on other machines.
+"""
 from __future__ import annotations
 
 import json
 import subprocess
 from pathlib import Path
 
-FASTORANGE_SCRIPTS = Path(r"C:\Users\29455\.agents\skills\fastorange-control\scripts")
-SECO_SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
+from . import paths
+from .netinfo import find_tap_adapter, process_exists
+
+FASTORANGE_SCRIPTS = paths.ROOT / "scripts" / "fastorange"
+SECO_SCRIPTS = paths.ROOT / "scripts"
 
 
 def _run_ps1(path: Path, *args: str, timeout: int = 90) -> str:
@@ -19,15 +28,26 @@ def _run_ps1(path: Path, *args: str, timeout: int = 90) -> str:
 
 
 def fastorange_state() -> dict:
-    out = _run_ps1(FASTORANGE_SCRIPTS / "fastorange_state.ps1", timeout=40)
-    state = "unknown"
-    for line in out.splitlines():
-        if line.startswith("STATE:"):
-            state = line.split(":", 1)[1].strip()
-    node = ""
-    if "ServerNameText" in out:
-        node = out.split("ServerNameText", 1)[1].splitlines()[0].strip(" :'")
-    return {"state": state, "node": node, "raw": out}
+    result = {"state": "unknown", "node": "", "raw": ""}
+    try:
+        out = _run_ps1(FASTORANGE_SCRIPTS / "fastorange_state.ps1", timeout=40)
+        result["raw"] = out
+        for line in out.splitlines():
+            if line.startswith("STATE:"):
+                result["state"] = line.split(":", 1)[1].strip()
+        if "ServerNameText" in out:
+            result["node"] = out.split("ServerNameText", 1)[1].splitlines()[0].strip(" :'")
+    except Exception as exc:
+        result["raw"] = str(exc)
+    # The adapter is authoritative when present; also the fallback when UIA
+    # fails (missing client, different version, non-Chinese Windows).
+    adapter = find_tap_adapter("192.168.255.")
+    if adapter:
+        result["state"] = "connected"
+        result["ip"] = adapter["ip"]
+    elif result["state"] in ("unknown", "", "not_running"):
+        result["state"] = "disconnected" if process_exists("FastOrange.exe") else "not_running"
+    return result
 
 
 def fastorange_connect() -> str:
@@ -43,15 +63,30 @@ def fastorange_select_server(name: str) -> str:
 
 
 def seco_state() -> dict:
-    out = _run_ps1(SECO_SCRIPTS / "seco_state.ps1", timeout=40)
-    for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("{"):
-            try:
-                return json.loads(line)
-            except ValueError:
-                pass
-    return {"state": "unknown", "raw": out}
+    result = {"state": "unknown", "raw": ""}
+    try:
+        out = _run_ps1(SECO_SCRIPTS / "seco_state.ps1", timeout=40)
+        result["raw"] = out
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("{"):
+                try:
+                    result.update(json.loads(line))
+                    break
+                except ValueError:
+                    pass
+    except Exception as exc:
+        result["raw"] = str(exc)
+    if result["state"] in ("unknown", "", "not_running"):
+        adapter = find_tap_adapter("192.168.220.")
+        if adapter:
+            result["state"] = "connected"
+            result["ip"] = adapter["ip"]
+        elif process_exists("SecoClient.exe"):
+            result["state"] = "disconnected"
+        else:
+            result["state"] = "not_running"
+    return result
 
 
 def seco_connect() -> str:

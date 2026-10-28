@@ -1,7 +1,7 @@
 param([string]$Name, [string]$TitleMatch = 'NetPilot', [string]$ControlType = 'Button')
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-$proc = Get-Process pythonw | Where-Object { $_.MainWindowTitle -like "*$TitleMatch*" } | Select-Object -First 1
+$proc = Get-Process pythonw,NetPilot -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like "*$TitleMatch*" } | Select-Object -First 1
 if (-not $proc) { Write-Error "window $TitleMatch not found"; exit 1 }
 $root = [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
 $all = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)
