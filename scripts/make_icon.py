@@ -2,9 +2,11 @@
 import io
 import os
 import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-sys.path.insert(0, r"D:\NetPilot")
+sys.path.insert(0, str(ROOT))
 
 from PIL import Image
 from PySide6.QtCore import Qt
@@ -37,8 +39,9 @@ buffer = pix.toImage()
 bits = buffer.bits()
 raw = bytes(bits)
 img = Image.frombytes("RGBA", (256, 256), raw, "raw", "BGRA")
-os.makedirs(r"D:\NetPilot\assets", exist_ok=True)
-img.save(r"D:\NetPilot\assets\netpilot.ico",
+assets = ROOT / "assets"
+assets.mkdir(exist_ok=True)
+img.save(str(assets / "netpilot.ico"),
          sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
-img.save(r"D:\NetPilot\assets\netpilot.png")
-print("icon written to assets/netpilot.ico")
+img.save(str(assets / "netpilot.png"))
+print("icon written to", assets / "netpilot.ico")

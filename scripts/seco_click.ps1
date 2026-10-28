@@ -1,9 +1,24 @@
 param([ValidateSet('connect', 'disconnect')][string]$Action)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+function Start-SecoClient {
+    $candidates = @(
+        'C:\Program Files (x86)\SecoClient\SecoClient.exe',
+        'C:\Program Files\SecoClient\SecoClient.exe'
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { Start-Process $path; return $true }
+    }
+    $appPath = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\SecoClient.exe' -ErrorAction SilentlyContinue
+    if ($appPath) {
+        $exe = $appPath.'(default)'
+        if ($exe -and (Test-Path $exe)) { Start-Process $exe; return $true }
+    }
+    return $false
+}
 $proc = Get-Process SecoClient | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $proc) {
-    Start-Process 'C:\Program Files (x86)\SecoClient\SecoClient.exe'
+    if (-not (Start-SecoClient)) { Write-Output '{"ok":false,"message":"SecoClient.exe not found (not installed?)"}'; exit 0 }
     Start-Sleep -Seconds 4
     $proc = Get-Process SecoClient | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 }

@@ -6,9 +6,24 @@ function Get-Root {
     if (-not $proc) { return $null }
     return [System.Windows.Automation.AutomationElement]::FromHandle($proc.MainWindowHandle)
 }
+function Start-SecoClient {
+    $candidates = @(
+        'C:\Program Files (x86)\SecoClient\SecoClient.exe',
+        'C:\Program Files\SecoClient\SecoClient.exe'
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { Start-Process $path; return $true }
+    }
+    $appPath = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\SecoClient.exe' -ErrorAction SilentlyContinue
+    if ($appPath) {
+        $exe = $appPath.'(default)'
+        if ($exe -and (Test-Path $exe)) { Start-Process $exe; return $true }
+    }
+    return $false
+}
 $root = Get-Root
 if (-not $root) {
-    Start-Process 'C:\Program Files (x86)\SecoClient\SecoClient.exe'
+    if (-not (Start-SecoClient)) { Write-Output '{"ok":false,"message":"SecoClient.exe not found (not installed?)"}'; exit 0 }
     Start-Sleep -Seconds 5
     $root = Get-Root
 }

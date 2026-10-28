@@ -1,6 +1,6 @@
 # Build the standalone NetPilot.exe (requires: pip install pyinstaller pillow).
 $ErrorActionPreference = 'Stop'
-$root = 'D:\NetPilot'
+$root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root '.venv\Scripts\python.exe'
 & $python -m PyInstaller `
     --noconfirm --clean --onefile --windowed --name NetPilot `

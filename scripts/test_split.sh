@@ -2,7 +2,7 @@
 # Minimal end-to-end split test: curl.exe must egress via FastOrange (Tokyo),
 # everything else via the physical adapter (China direct).
 set -u
-cd /d/NetPilot
+cd "$(dirname "$0")/.."
 TOKEN=$(cat data/agent.token)
 H="X-NetPilot-Token: $TOKEN"
 echo "=== agent status ==="

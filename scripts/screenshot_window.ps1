@@ -1,4 +1,5 @@
-param([string]$ProcessName = 'pythonw', [string]$TitleMatch = 'NetPilot', [string]$OutFile = 'D:\NetPilot\logs\gui.png')
+param([string]$ProcessName = 'pythonw', [string]$TitleMatch = 'NetPilot', [string]$OutFile = '')
+if ($OutFile -eq '') { $OutFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'logs\gui.png' }
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
 using System;

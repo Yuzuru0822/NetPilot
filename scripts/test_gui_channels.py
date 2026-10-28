@@ -3,9 +3,11 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-sys.path.insert(0, r"D:\NetPilot")
+sys.path.insert(0, str(ROOT))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -50,7 +52,7 @@ s = load_settings()
 names = {c["id"]: c["name"] for c in s["channels"]}
 assert names.get("fastorange") == "国际加速", names
 assert names.get(new["id"]) == "测试通道", names
-conf = json.load(open(r"D:\NetPilot\data\singbox.json", encoding="utf-8"))
+conf = json.load(open(ROOT / "data" / "singbox.json", encoding="utf-8"))
 tags = [o["tag"] for o in conf["outbounds"]]
 assert new["id"] in tags, tags
 print("apply OK:", tags)
