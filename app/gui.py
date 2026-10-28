@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QSystemTrayIcon,
 )
 
-from . import paths, updater, vpn
+from . import paths, updater
 from .agent_client import AgentClient, AgentOffline, ClashClient
 from .config_builder import generate, load_settings, save_settings
 from .netinfo import list_adapters, list_processes
@@ -132,7 +132,6 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_rules_tab(), "分流规则")
         self.tabs.addTab(self._build_connections_tab(), "实时连接")
-        self.tabs.addTab(self._build_vpn_tab(), "VPN 与网卡")
         self.tabs.addTab(self._build_logs_tab(), "日志与诊断")
         root.addWidget(self.tabs)
         self.setCentralWidget(central)
@@ -145,13 +144,9 @@ class MainWindow(QMainWindow):
         self.conn_timer = QTimer(self)
         self.conn_timer.timeout.connect(self.refresh_connections)
         self.conn_timer.start(2000)
-        self.vpn_timer = QTimer(self)
-        self.vpn_timer.timeout.connect(self.refresh_vpn_states)
-        self.vpn_timer.start(8000)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.refresh_status()
         self.refresh_adapters()
-        self.refresh_vpn_states()
 
     # ---------- infrastructure ----------
     def name_map(self) -> dict:
@@ -238,12 +233,11 @@ class MainWindow(QMainWindow):
             self._fill_channel_combo(self.default_combo, self.settings.get("default_channel", "direct"))
 
     def _tab_changed(self, index):
-        if index == 1:
+        if index == 0:
+            self.refresh_adapters()
+        elif index == 1:
             self.refresh_connections()
         elif index == 2:
-            self.refresh_adapters()
-            self.refresh_vpn_states()
-        elif index == 3:
             self.refresh_logs()
 
     # ---------- status / core control ----------
@@ -713,103 +707,6 @@ class MainWindow(QMainWindow):
             for col, value in enumerate(values):
                 self.conn_table.setItem(i, col, QTableWidgetItem(value))
 
-    # ---------- VPN tab ----------
-    def _build_vpn_tab(self):
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-
-        fo_group = QGroupBox("快橙 FastOrange（国际外网）")
-        fo = QFormLayout(fo_group)
-        self.fo_state = QLabel("检测中…")
-        fo.addRow("状态：", self.fo_state)
-        self.fo_node = QLabel("-")
-        fo.addRow("当前节点：", self.fo_node)
-        fo_buttons = QHBoxLayout()
-        for text, handler in (("连接", self.fo_connect), ("断开", self.fo_disconnect), ("刷新", self.refresh_vpn_states)):
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            fo_buttons.addWidget(btn)
-        self.fo_server_input = QLineEdit()
-        self.fo_server_input.setPlaceholderText("节点匹配，如 *gc x13（留空列出节点）")
-        fo_buttons.addWidget(self.fo_server_input)
-        switch_btn = QPushButton("切换节点")
-        switch_btn.clicked.connect(self.fo_switch)
-        fo_buttons.addWidget(switch_btn)
-        fo.addRow(fo_buttons)
-        layout.addWidget(fo_group)
-
-        seco_group = QGroupBox("SecoClient（公司内网）")
-        seco = QFormLayout(seco_group)
-        self.seco_state = QLabel("检测中…")
-        seco.addRow("状态：", self.seco_state)
-        seco_buttons = QHBoxLayout()
-        for text, handler in (("连接", self.seco_connect), ("断开", self.seco_disconnect), ("刷新", self.refresh_vpn_states)):
-            btn = QPushButton(text)
-            btn.clicked.connect(handler)
-            seco_buttons.addWidget(btn)
-        seco.addRow(seco_buttons)
-        seco.addRow(QLabel("首次使用需在 SecoClient 窗口手动登录；连接异常时关闭程序重试几次。"))
-        layout.addWidget(seco_group)
-
-        adapter_group = QGroupBox("网卡状态")
-        adapter_layout = QVBoxLayout(adapter_group)
-        self.adapter_table = QTableWidget(0, 3)
-        self.adapter_table.setHorizontalHeaderLabels(["网卡", "状态", "IPv4 地址"])
-        self.adapter_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.adapter_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self.adapter_table.verticalHeader().setVisible(False)
-        self.adapter_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        adapter_layout.addWidget(self.adapter_table)
-        layout.addWidget(adapter_group)
-        return tab
-
-    def refresh_vpn_states(self):
-        if self.tabs.currentIndex() != 2:
-            return
-        self.run_task(vpn.fastorange_state, self._update_fo_state)
-        self.run_task(vpn.seco_state, self._update_seco_state)
-
-    def _update_fo_state(self, result):
-        state_map = {"connected": "🟢 已连接", "disconnected": "⚪ 已断开",
-                     "connecting": "🟡 连接中", "not_running": "⚪ 未运行"}
-        self.fo_state.setText(state_map.get(result.get("state"), result.get("state", "未知")))
-        self.fo_node.setText(result.get("node") or "-")
-
-    def _update_seco_state(self, result):
-        state_map = {
-            "connected": "🟢 已连接", "disconnected": "⚪ 已断开",
-            "login_required": "🟡 等待手动登录", "not_running": "⚪ 未运行",
-        }
-        self.seco_state.setText(state_map.get(result.get("state"), result.get("state", "未知")))
-
-    def fo_connect(self):
-        self._vpn_action(vpn.fastorange_connect)
-
-    def fo_disconnect(self):
-        self._vpn_action(vpn.fastorange_disconnect)
-
-    def fo_switch(self):
-        name = self.fo_server_input.text().strip()
-        self._vpn_action(lambda: vpn.fastorange_select_server(name))
-
-    def seco_connect(self):
-        self._vpn_action(vpn.seco_connect)
-
-    def seco_disconnect(self):
-        self._vpn_action(vpn.seco_disconnect)
-
-    def _vpn_action(self, fn):
-        self.statusBar().showMessage("正在执行 VPN 操作，请稍候（约 5–30 秒）…", 15000)
-
-        def done(result):
-            text = result if isinstance(result, str) else str(result)
-            self.statusBar().showMessage(text.strip().splitlines()[-1][:150] if text.strip() else "完成", 10000)
-            self.refresh_vpn_states()
-            if self.core_running:
-                self.run_task(self.agent.fixroutes)
-
-        self.run_task(fn, done)
-
     def refresh_adapters(self):
         def work():
             return list_adapters()
@@ -823,11 +720,6 @@ class MainWindow(QMainWindow):
                 combo.clear()
                 combo.addItems(names)
                 combo.setCurrentText(current)
-            self.adapter_table.setRowCount(len(adapters))
-            for i, adapter in enumerate(adapters):
-                self.adapter_table.setItem(i, 0, QTableWidgetItem(adapter["name"]))
-                self.adapter_table.setItem(i, 1, QTableWidgetItem("🟢 在线" if adapter["is_up"] else "⚪ 离线"))
-                self.adapter_table.setItem(i, 2, QTableWidgetItem(", ".join(adapter["ipv4"])))
             for i, row in enumerate(self._channel_rows):
                 bound = row["iface_combo"].currentText()
                 match = next((a for a in adapters if a["name"] == bound), None)
