@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (
     QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget, QSystemTrayIcon,
 )
 
-from . import paths, vpn
+from . import paths, updater, vpn
 from .agent_client import AgentClient, AgentOffline, ClashClient
 from .config_builder import generate, load_settings, save_settings
 from .netinfo import list_adapters, list_processes
@@ -111,7 +111,7 @@ class ProcessPicker(QDialog):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("NetPilot · 应用分流管家")
+        self.setWindowTitle(f"NetPilot · 应用分流管家 v{updater.APP_VERSION}")
         self.resize(980, 700)
         self.setWindowIcon(make_icon())
         self.agent = AgentClient()
@@ -189,6 +189,11 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("正在检查核心状态…")
         layout.addWidget(self.status_label)
         layout.addStretch()
+        self.version_label = QLabel(f"v{updater.APP_VERSION}")
+        layout.addWidget(self.version_label)
+        self.update_button = QPushButton("检查更新")
+        self.update_button.clicked.connect(self.check_update)
+        layout.addWidget(self.update_button)
         self.agent_button = QPushButton("启动核心服务（管理员）")
         self.agent_button.clicked.connect(self.start_agent)
         self.agent_button.setVisible(False)
@@ -287,6 +292,72 @@ class MainWindow(QMainWindow):
         else:
             self.apply_settings(start_only=True)
         QTimer.singleShot(2500, lambda: self.toggle_button.setEnabled(True))
+
+    # ---------- auto update ----------
+    def check_update(self):
+        self.update_button.setEnabled(False)
+        self.statusBar().showMessage("正在检查 GitHub 最新版本…", 8000)
+
+        def done(info):
+            self.update_button.setEnabled(True)
+            if not updater.is_newer(info["tag"]):
+                self.statusBar().showMessage(f"当前已是最新版本（{info['tag']}）", 10000)
+                return
+            notes = info["notes"].splitlines()[0] if info["notes"] else ""
+            answer = QMessageBox.question(
+                self, "发现新版本",
+                f"当前版本 v{updater.APP_VERSION}，最新版本 {info['tag']}。\n{notes}\n\n"
+                "是否下载并自动更新？更新会重启 NetPilot，规则和配置保留。")
+            if answer == QMessageBox.Yes:
+                self._download_update(info)
+
+        def failed(msg):
+            self.update_button.setEnabled(True)
+            self.statusBar().showMessage("检查更新失败：" + msg, 12000)
+
+        self.run_task(updater.check_latest, done, failed)
+
+    def _download_update(self, info):
+        self.update_button.setEnabled(False)
+        dest = paths.ROOT / "build" / "update" / info["zip_name"]
+        progress = {"pct": -1, "done": 0, "total": 0}
+
+        def cb(done, total):
+            progress["done"], progress["total"] = done, total
+            if total:
+                progress["pct"] = int(done * 100 / total)
+
+        def work():
+            updater.download_zip(info["zip_url"], dest, cb)
+            return dest
+
+        def done(path):
+            self._progress_timer.stop()
+            self.statusBar().showMessage("下载完成，正在应用更新，程序将自动重启…", 20000)
+            self._launch_updater(path)
+
+        def failed(msg):
+            self._progress_timer.stop()
+            self.update_button.setEnabled(True)
+            self.statusBar().showMessage("下载失败：" + msg, 12000)
+
+        self._progress_timer = QTimer(self)
+        self._progress_timer.timeout.connect(
+            lambda: self.statusBar().showMessage(
+                f"正在下载 {info['tag']}：{progress['pct']}%"
+                f"（{progress['done'] // 1048576}MB / {progress['total'] // 1048576}MB）", 30000)
+            if progress["pct"] >= 0 else None)
+        self._progress_timer.start(500)
+        self.run_task(work, done, failed)
+
+    def _launch_updater(self, zip_path):
+        script = paths.ROOT / "scripts" / "apply_update.ps1"
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+             "Start-Process powershell -Verb RunAs -ArgumentList "
+             f"'-NoProfile -ExecutionPolicy Bypass -File \"{script}\" -ZipPath \"{zip_path}\"'"],
+            creationflags=subprocess.CREATE_NO_WINDOW)
+        QApplication.quit()
 
     # ---------- rules tab ----------
     def _build_rules_tab(self):
