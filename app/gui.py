@@ -831,6 +831,11 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if sys.platform == "win32":
+        # Give the taskbar its own app identity (icon + grouping) instead of
+        # lumping the window under the generic Python launcher.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("NetPilot.App")
     app = QApplication(sys.argv)
     app.setApplicationName("NetPilot")
     app.setQuitOnLastWindowClosed(False)

@@ -1,7 +1,13 @@
 """Shared paths and constants for NetPilot."""
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+# In a PyInstaller-frozen exe, resolve everything relative to the exe location
+# (which sits in the project root), not the temporary extraction directory.
+if getattr(sys, "frozen", False):
+    ROOT = Path(sys.executable).resolve().parent
+else:
+    ROOT = Path(__file__).resolve().parent.parent
 CORE_EXE = ROOT / "core" / "sing-box-1.14.4-windows-amd64" / "sing-box.exe"
 DATA_DIR = ROOT / "data"
 LOG_DIR = ROOT / "logs"

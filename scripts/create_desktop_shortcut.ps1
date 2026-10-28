@@ -4,15 +4,22 @@ $desktop = [Environment]::GetFolderPath('Desktop')
 $lnkPath = Join-Path $desktop 'NetPilot.lnk'
 $ws = New-Object -ComObject WScript.Shell
 $lnk = $ws.CreateShortcut($lnkPath)
-$lnk.TargetPath = Join-Path $root '.venv\Scripts\pythonw.exe'
-$lnk.Arguments = Join-Path $root 'NetPilot.pyw'
+$exe = Join-Path $root 'NetPilot.exe'
+if (Test-Path $exe) {
+    $lnk.TargetPath = $exe
+    $lnk.Arguments = ''
+    $lnk.IconLocation = "$exe,0"
+} else {
+    $lnk.TargetPath = Join-Path $root '.venv\Scripts\pythonw.exe'
+    $lnk.Arguments = Join-Path $root 'NetPilot.pyw'
+    $lnk.IconLocation = Join-Path $root '.venv\Scripts\pythonw.exe,0'
+}
 $lnk.WorkingDirectory = $root
-$lnk.IconLocation = Join-Path $root '.venv\Scripts\pythonw.exe,0'
 $lnk.Description = 'NetPilot 应用分流管家 - 按应用选择网络通道'
 $lnk.Save()
 Write-Output "shortcut created: $lnkPath"
 
-$existing = Get-Process pythonw -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*NetPilot*' } | Select-Object -First 1
+$existing = Get-Process pythonw,NetPilot -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -like '*NetPilot*' } | Select-Object -First 1
 if ($existing) {
     Add-Type @"
 using System;

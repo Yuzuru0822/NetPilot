@@ -18,5 +18,11 @@ Desktop.ini
 .vscode/
 .idea/
 
+# PyInstaller build artifacts (the exe is built locally, not committed)
+build/
+dist/
+NetPilot.exe
+*.spec
+
 # Misc
 *.zip

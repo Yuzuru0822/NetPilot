@@ -25,7 +25,7 @@ copy netpilot.example.json data\netpilot.json               # 可选：以示例
 
 ## 快速开始
 
-1. **启动界面**：双击 `启动NetPilot.bat`。
+1. **启动界面**：双击 `NetPilot.exe`（独立 exe，任务栏显示 NetPilot 图标，不依赖 Python 环境）或桌面快捷方式 `NetPilot.lnk`；开发模式也可用 `启动NetPilot.bat`（pythonw 跑脚本）。
 2. **启动核心服务**：如果顶部显示"核心服务离线"，点"启动核心服务（管理员）"，在 UAC 弹窗点"是"。之后界面内所有操作不再需要 UAC。
 3. **点"启动分流"**。状态变绿即生效。
 4. **配置规则**（"分流规则"页签）：
@@ -65,6 +65,16 @@ copy netpilot.example.json data\netpilot.json               # 可选：以示例
 - **看日志**："日志与诊断"页签（sing-box 最近 300 行）＋ `logs\agent.log`；`logs\singbox.log` 有完整连接明细。
 - **WiFi 与有线切换**：把"公网直连"的绑定网卡改成对应名字后重新应用。
 - **彻底停止**：界面停止分流后，可再执行 `curl -X POST -H "X-NetPilot-Token: <data\agent.token 内容>" http://127.0.0.1:19090/shutdown` 关闭服务。
+
+## 打包独立 exe
+
+```powershell
+D:\NetPilot\.venv\Scripts\python.exe -m pip install pyinstaller pillow
+D:\NetPilot\scripts\make_icon.py        # 可选：重新生成 assets\netpilot.ico
+D:\NetPilot\scripts\build_exe.ps1       # 生成单文件 NetPilot.exe 到项目根目录
+```
+
+exe 与 `data\`、`scripts\`、`core\` 同级放置即可共享现有配置与内核；`build\` 为中间产物，不入库。
 
 ## 开机自启（可选）
 
