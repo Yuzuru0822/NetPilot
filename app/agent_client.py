@@ -22,10 +22,10 @@ class AgentClient:
             token = ""
         return {"X-NetPilot-Token": token}
 
-    def _call(self, method: str, endpoint: str) -> dict:
+    def _call(self, method: str, endpoint: str, timeout: float | None = None) -> dict:
         try:
             resp = requests.request(method, paths.AGENT_BASE + endpoint,
-                                    headers=self._headers(), timeout=self.timeout)
+                                    headers=self._headers(), timeout=timeout or self.timeout)
         except requests.RequestException as exc:
             raise AgentOffline(str(exc)) from exc
         try:
@@ -37,13 +37,13 @@ class AgentClient:
         return self._call("GET", "/status")
 
     def start(self) -> dict:
-        return self._call("POST", "/start")
+        return self._call("POST", "/start", timeout=200)
 
     def stop(self) -> dict:
         return self._call("POST", "/stop")
 
     def restart(self) -> dict:
-        return self._call("POST", "/restart")
+        return self._call("POST", "/restart", timeout=200)
 
     def reload(self) -> dict:
         return self._call("POST", "/reload")

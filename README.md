@@ -76,7 +76,8 @@ copy netpilot.example.json data\netpilot.json               # 可选：以示例
 - **路由被 VPN 抢占**：界面"日志与诊断 → 修复路由"。
 - **看日志**："日志与诊断"页签（sing-box 最近 300 行）＋ `logs\agent.log`；`logs\singbox.log` 有完整连接明细。
 - **WiFi 与有线切换**：把"公网直连"的绑定网卡改成对应名字后重新应用。
-- **彻底停止**：界面停止分流后，可再执行 `curl -X POST -H "X-NetPilot-Token: <data\agent.token 内容>" http://127.0.0.1:19090/shutdown` 关闭服务。
+- **彻底退出**：托盘右键 →“退出程序（停止分流与服务）”，会停止 sing-box、删除 NetPilot 路由并关闭 agent，不再残留后台服务。
+- **启动等待**：TUN 网卡在部分机器上可能要 1–2 分钟才就绪，顶部会显示“分流启动中”；只有内核 API 与 TUN 真正就绪后才会显示“分流运行中”。启动期间请不要反复点启动/停止。
 
 ## 自动更新
 
@@ -90,6 +91,7 @@ copy netpilot.example.json data\netpilot.json               # 可选：以示例
 D:\NetPilot\.venv\Scripts\python.exe -m pip install pyinstaller pillow
 D:\NetPilot\scripts\make_icon.py        # 可选：重新生成 assets\netpilot.ico
 D:\NetPilot\scripts\build_exe.ps1       # 生成单文件 NetPilot.exe 到项目根目录
+D:\NetPilot\scripts\build_agent_exe.ps1 # 生成单文件 NetPilotAgent.exe 到项目根目录
 ```
 
 exe 与 `data\`、`scripts\`、`core\` 同级放置即可共享现有配置与内核；`build\` 为中间产物，不入库。

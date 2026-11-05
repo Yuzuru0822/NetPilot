@@ -18,6 +18,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import paths
@@ -25,6 +26,49 @@ from . import paths
 LOG = logging.getLogger("netpilot.agent")
 AUTOSTART_FILE = paths.DATA_DIR / "autostart"
 NO_WINDOW = subprocess.CREATE_NO_WINDOW
+AGENT_MUTEX = None
+
+
+def acquire_agent_mutex() -> bool:
+    """Only one agent may own the core and the local API at a time."""
+    global AGENT_MUTEX
+    import ctypes
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\NetPilotAgent")
+    if not handle:
+        return False
+    if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return False
+    AGENT_MUTEX = handle
+    return True
+
+
+def release_agent_mutex() -> None:
+    global AGENT_MUTEX
+    if AGENT_MUTEX:
+        import ctypes
+        ctypes.windll.kernel32.ReleaseMutex(AGENT_MUTEX)
+        ctypes.windll.kernel32.CloseHandle(AGENT_MUTEX)
+        AGENT_MUTEX = None
+
+
+def _kill_image(image: str) -> None:
+    """taskkill /IM can hang for ~60s on this machine; Stop-Process is fast."""
+    try:
+        _run(["powershell", "-NoProfile", "-Command",
+              f"Get-Process '{image}' -ErrorAction SilentlyContinue | Stop-Process -Force"],
+             capture_output=True, timeout=8)
+    except subprocess.TimeoutExpired:
+        LOG.warning("timeout stopping process image %s", image)
+
+
+def _kill_pid(pid: int) -> None:
+    try:
+        _run(["powershell", "-NoProfile", "-Command",
+              f"Stop-Process -Id {pid} -Force -ErrorAction SilentlyContinue"],
+             capture_output=True, timeout=8)
+    except subprocess.TimeoutExpired:
+        LOG.warning("timeout stopping pid %s", pid)
 
 
 def _run(cmd, **kwargs):
@@ -86,9 +130,21 @@ class SingBox:
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
         self.started_at: float | None = None
+        self.starting = False
 
     def running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
+
+    def _core_ready(self) -> bool:
+        """The Clash API starts only after the TUN inbound is fully up."""
+        try:
+            request = urllib.request.Request(
+                paths.CLASH_BASE + "/version",
+                headers={"Authorization": f"Bearer {paths.CLASH_SECRET}"})
+            with urllib.request.urlopen(request, timeout=2) as response:
+                return response.status == 200
+        except Exception:
+            return False
 
     def start(self) -> tuple[bool, str]:
         with self.lock:
@@ -98,30 +154,59 @@ class SingBox:
                 return False, f"core not found: {paths.CORE_EXE}"
             if not paths.SINGBOX_CONFIG.exists():
                 return False, "config not generated yet"
-            log_file = open(paths.LOG_DIR / "singbox.log", "w", encoding="utf-8")
+            # An orphaned core left by an older agent would keep the TUN and the
+            # old rules alive. Always clear it before starting a fresh core.
+            _kill_image("sing-box")
+            time.sleep(0.5)
+            self.starting = True
             try:
-                self.proc = subprocess.Popen(
-                    [str(paths.CORE_EXE), "run", "-c", str(paths.SINGBOX_CONFIG)],
-                    cwd=str(paths.CORE_EXE.parent),
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
-            except Exception as exc:
-                log_file.close()
-                return False, f"spawn failed: {exc}"
-            self.started_at = time.time()
-            paths.SINGBOX_PID_FILE.write_text(str(self.proc.pid))
-            LOG.info("sing-box started pid=%s", self.proc.pid)
-            time.sleep(3)
-            if self.proc.poll() is not None:
-                return False, "exited at startup:\n" + tail_singbox_log(40)
-            fix_msg = apply_route_fix()
-            return True, f"running pid={self.proc.pid}\nroute fix:\n{fix_msg}"
+                log_file = open(paths.LOG_DIR / "singbox.log", "w", encoding="utf-8")
+                try:
+                    self.proc = subprocess.Popen(
+                        [str(paths.CORE_EXE), "run", "-c", str(paths.SINGBOX_CONFIG)],
+                        cwd=str(paths.CORE_EXE.parent),
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
+                except Exception as exc:
+                    log_file.close()
+                    return False, f"spawn failed: {exc}"
+                self.started_at = time.time()
+                paths.SINGBOX_PID_FILE.write_text(str(self.proc.pid))
+                LOG.info("sing-box starting pid=%s", self.proc.pid)
+                # TUN creation can take over 100 seconds on this machine. Never
+                # report success or touch routes until the core is actually ready.
+                deadline = self.started_at + 180
+                while time.time() < deadline:
+                    if self.proc.poll() is not None:
+                        return False, "exited at startup:\n" + tail_singbox_log(40)
+                    if self._core_ready():
+                        break
+                    time.sleep(2)
+                else:
+                    self.proc.terminate()
+                    try:
+                        self.proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.proc.kill()
+                    self.proc = None
+                    remove_route_fix()
+                    return False, "core startup timed out (TUN/API not ready):\n" + tail_singbox_log(40)
+                elapsed = time.time() - self.started_at
+                LOG.info("sing-box ready pid=%s after %.1fs", self.proc.pid, elapsed)
+                fix_msg = apply_route_fix()
+                return True, f"running pid={self.proc.pid} (ready in {elapsed:.1f}s)\nroute fix:\n{fix_msg}"
+            finally:
+                self.starting = False
 
     def stop(self) -> tuple[bool, str]:
         with self.lock:
             if not self.running():
+                # Even if we lost ownership, never leave an orphaned core or
+                # stale /1 routes behind after stop/shutdown.
+                _kill_image("sing-box")
+                remove_route_fix()
                 return True, "not running"
             pid = self.proc.pid
             self.proc.terminate()
@@ -164,6 +249,7 @@ def status() -> dict:
     return {
         "agent_pid": os.getpid(),
         "singbox_running": CORE.running(),
+        "singbox_starting": CORE.starting,
         "singbox_pid": CORE.proc.pid if CORE.running() else None,
         "singbox_started_at": CORE.started_at,
         "config_exists": paths.SINGBOX_CONFIG.exists(),
@@ -240,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
                         cmd = entry.get("CommandLine") or ""
                         pid = int(entry.get("ProcessId") or 0)
                         if "app.agent" in cmd and pid and pid != os.getpid():
-                            _run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
+                            _kill_pid(pid)
                             killed.append(pid)
                 except (ValueError, TypeError):
                     continue
@@ -259,6 +345,7 @@ class Handler(BaseHTTPRequestHandler):
             # Replace the running agent with one using the latest code.
             # The child inherits this process's elevation, so no new UAC prompt.
             CORE.stop()
+            release_agent_mutex()
             if getattr(sys, "frozen", False):
                 subprocess.Popen([sys.executable], cwd=str(paths.ROOT),
                                  creationflags=subprocess.CREATE_NO_WINDOW)
@@ -280,12 +367,13 @@ def main() -> None:
     setup_logging()
     global TOKEN
     TOKEN = agent_token()
+    if not acquire_agent_mutex():
+        LOG.info("another agent instance is already active; exiting")
+        return
     paths.AGENT_PID_FILE.write_text(str(os.getpid()))
     # A previous agent may have died leaving an orphaned sing-box behind:
     # adopt a clean slate so we never spawn a duplicate core (TUN conflicts).
-    _run(["powershell", "-NoProfile", "-Command",
-                    "Get-Process sing-box -ErrorAction SilentlyContinue | Stop-Process -Force"],
-                   capture_output=True)
+    _kill_image("sing-box")
     remove_route_fix()
     atexit.register(CORE.stop)
     server = NetPilotHTTPServer((paths.AGENT_ADDR, paths.AGENT_PORT), Handler)
@@ -315,6 +403,8 @@ def _watchdog() -> None:
     while True:
         time.sleep(5)
         try:
+            if CORE.starting:
+                continue
             if CORE.running():
                 if not _route_fix_present():
                     LOG.warning("watchdog: /1 routes missing, re-applying fix")

@@ -8,7 +8,7 @@ import requests
 
 from . import paths
 
-APP_VERSION = "2.3.0"
+APP_VERSION = "2.3.1"
 REPO = "Yuzuru0822/NetPilot"
 LATEST_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 

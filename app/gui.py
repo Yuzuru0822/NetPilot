@@ -202,17 +202,44 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(make_icon(), self)
         menu = QMenu()
         show_action = QAction("显示主窗口", self)
-        show_action.triggered.connect(self.showNormal)
+        show_action.triggered.connect(self.show_main_window)
         menu.addAction(show_action)
         toggle_action = QAction("启动/停止分流", self)
         toggle_action.triggered.connect(self.toggle_core)
         menu.addAction(toggle_action)
-        quit_action = QAction("退出界面（核心保持运行）", self)
-        quit_action.triggered.connect(QApplication.quit)
+        quit_action = QAction("退出程序（停止分流与服务）", self)
+        quit_action.triggered.connect(self.quit_all)
         menu.addAction(quit_action)
         self.tray.setContextMenu(menu)
-        self.tray.activated.connect(lambda reason: self.showNormal() if reason == QSystemTrayIcon.DoubleClick else None)
+        self.tray.activated.connect(
+            lambda reason: self.show_main_window() if reason == QSystemTrayIcon.DoubleClick else None)
         self.tray.show()
+
+    def show_main_window(self):
+        """Restore from the tray and make the window the foreground window."""
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.show()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if self.windowHandle():
+            self.windowHandle().requestActivate()
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.user32.SetForegroundWindow(int(self.winId()))
+
+    def quit_all(self):
+        """Exit the GUI, stop sing-box, and shut down the agent."""
+        if getattr(self, "_quitting", False):
+            return
+        self._quitting = True
+        self.statusBar().showMessage("正在停止分流并退出核心服务…", 20000)
+
+        def finished(_result):
+            self.tray.hide()
+            QApplication.exit(0)
+
+        self.run_task(self.agent.shutdown, finished, finished)
 
     def closeEvent(self, event):
         if self._first_tray_message:
@@ -261,7 +288,11 @@ class MainWindow(QMainWindow):
             return
         self.toggle_button.setEnabled(True)
         self.core_running = bool(status.get("singbox_running"))
-        if self.core_running:
+        self.core_starting = bool(status.get("singbox_starting"))
+        if self.core_starting:
+            self.status_label.setText("🟡 分流启动中（等待内核与 TUN 就绪）…")
+            self.toggle_button.setText("停止分流")
+        elif self.core_running:
             self.status_label.setText(f"🟢 分流运行中  (sing-box pid {status.get('singbox_pid')})")
             self.toggle_button.setText("停止分流")
         else:
@@ -619,6 +650,8 @@ class MainWindow(QMainWindow):
 
         def done(result):
             message = result.get("message", "")
+            if not result.get("ok", True):
+                QMessageBox.warning(self, "分流启动/重启失败", message or "未知错误")
             self.statusBar().showMessage(("已应用: " if not start_only else "") + message.splitlines()[0], 10000)
             self.refresh_status()
 
@@ -627,8 +660,10 @@ class MainWindow(QMainWindow):
     # ---------- connections tab ----------
     def _build_connections_tab(self):
         tab = QWidget()
+        self.connections_tab = tab
         layout = QVBoxLayout(tab)
         hint = QLabel("每 2 秒自动刷新，按下载速率排序。通道列显示该连接实际使用的出口。")
+        self.conn_hint = hint
         layout.addWidget(hint)
         self.conn_table = QTableWidget(0, 7)
         self.conn_table.setHorizontalHeaderLabels(["进程", "目标", "通道", "匹配规则", "↓速率", "↑速率", "累计 ↓/↑"])
@@ -655,18 +690,24 @@ class MainWindow(QMainWindow):
         return f"{value / 1024:.1f} KB"
 
     def refresh_connections(self):
-        if not self.core_running or self.tabs.currentIndex() != 1:
+        if not self.core_running or getattr(self, "core_starting", False) \
+                or self.tabs.currentWidget() is not self.connections_tab:
             return
 
         def work():
             try:
                 return self.clash.connections()
-            except Exception:
-                return None
+            except Exception as exc:
+                return {"error": str(exc)}
 
         self.run_task(work, self._update_connections)
 
     def _update_connections(self, connections):
+        if isinstance(connections, dict) and "error" in connections:
+            self.conn_hint.setText("连接读取失败：" + connections["error"])
+            return
+        self.conn_hint.setText("每 2 秒自动刷新，按下载速率排序。通道列显示该连接实际使用的出口。"
+                               if connections else "当前没有活动连接。")
         if connections is None:
             return
         now = time.time()
@@ -736,6 +777,7 @@ class MainWindow(QMainWindow):
     # ---------- logs tab ----------
     def _build_logs_tab(self):
         tab = QWidget()
+        self.logs_tab = tab
         layout = QVBoxLayout(tab)
         buttons = QHBoxLayout()
         for text, handler in (
@@ -765,7 +807,7 @@ class MainWindow(QMainWindow):
         return tab
 
     def refresh_logs(self):
-        if self.tabs.currentIndex() != 3:
+        if self.tabs.currentWidget() is not self.logs_tab:
             return
         if not self.log_auto.isChecked() and self.log_text.toPlainText():
             return
