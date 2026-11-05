@@ -16,7 +16,7 @@ Windows 自带的路由表只认识"目标 IP"，不认识"哪个程序"。NetPi
 
 | 分流规则 | 实时连接 | 日志与诊断 |
 |---|---|---|
-| ![分流规则](docs/images/rules.png) | ![实时连接](docs/images/connections.png) | ![日志与诊断](docs/images/logs.png) |
+| ![分流规则](https://raw.githubusercontent.com/Yuzuru0822/NetPilot/main/docs/images/rules.png) | ![实时连接](https://raw.githubusercontent.com/Yuzuru0822/NetPilot/main/docs/images/connections.png) | ![日志与诊断](https://raw.githubusercontent.com/Yuzuru0822/NetPilot/main/docs/images/logs.png) |
 
 ## 功能一览
 
