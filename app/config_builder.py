@@ -75,6 +75,78 @@ def _make_dns_server(tag: str, conf, detour: str) -> dict:
 
 CHANNEL_NAMES = {"direct": "公网直连", "fastorange": "快橙·国际", "company": "公司内网"}
 
+# --- selector outbounds for hot-switching -----------------------------------
+# The channel direct outbounds keep the plain channel id as their tag (the
+# connections tab maps chains back to channels through it). Selector groups get
+# an "np:" prefixed tag that can never collide with a channel id. Switching a
+# selector via the Clash API (PUT /proxies/{tag}) re-routes traffic instantly
+# without restarting the core, so "rule X now uses channel Y" and "the default
+# channel changed" are hot-applicable; rule add/remove/enable still needs a
+# full restart because route.rules themselves are static in sing-box.
+FINAL_SELECTOR = "np:final"
+PROCESS_RULE_PREFIX = "np:proc-"
+SUFFIX_RULE_PREFIX = "np:suf-"
+
+
+def process_rule_tag(index: int) -> str:
+    return f"{PROCESS_RULE_PREFIX}{index}"
+
+
+def suffix_rule_tag(index: int) -> str:
+    return f"{SUFFIX_RULE_PREFIX}{index}"
+
+
+def enabled_rules(rules: list[dict]) -> list[dict]:
+    """Rules that make it into the config. Selector tags are indexed by the
+    position within this filtered list, in both build_config and hot_patches."""
+    return [r for r in rules if r.get("enabled", True)]
+
+
+def _selector(tag: str, members: list[str], default: str) -> dict:
+    return {
+        "type": "selector",
+        "tag": tag,
+        "outbounds": list(members),
+        "default": default if default in members else members[0],
+        # A hot switch should take effect for existing connections too.
+        "interrupt_exist_connections": True,
+    }
+
+
+def selection_only_change(old: dict, new: dict) -> bool:
+    """Whether old->new only changes rule->channel targets or the default
+    channel, i.e. everything the Clash API can hot-switch. Anything else
+    (rules added/removed/enabled, channels edited, dns/tun/log changes)
+    requires rebuilding the core."""
+    if old.get("channels") != new.get("channels"):
+        return False
+    for section in ("dns", "tun", "log_level"):
+        if old.get(section) != new.get(section):
+            return False
+
+    def sig(rules):
+        return [(r.get("enabled", True), r.get("process") or r.get("suffix")) for r in rules]
+
+    for key in ("process_rules", "domain_rules"):
+        if sig(old.get(key, [])) != sig(new.get(key, [])):
+            return False
+    return True
+
+
+def hot_patches(old: dict, new: dict) -> list[tuple[str, str]]:
+    """(selector_tag, member_tag) pairs to switch via the Clash API. Only call
+    this when selection_only_change(old, new) is True."""
+    patches: list[tuple[str, str]] = []
+    for key, prefix in (("process_rules", PROCESS_RULE_PREFIX),
+                        ("domain_rules", SUFFIX_RULE_PREFIX)):
+        old_on, new_on = enabled_rules(old[key]), enabled_rules(new[key])
+        for i, (o, n) in enumerate(zip(old_on, new_on)):
+            if o["channel"] != n["channel"]:
+                patches.append((f"{prefix}{i}", n["channel"]))
+    if old["default_channel"] != new["default_channel"]:
+        patches.append((FINAL_SELECTOR, new["default_channel"]))
+    return patches
+
 
 def _migrate_channels(raw) -> list[dict]:
     """Accept the legacy {tag: interface} mapping and upgrade it to the
@@ -130,6 +202,15 @@ def build_config(settings: dict) -> dict:
         {"type": "direct", "tag": ch["id"], "bind_interface": ch["interface"], "domain_resolver": dns_tag(ch["id"])}
         for ch in channels
     ]
+    # Selector groups: one per enabled rule (so its target channel can be
+    # hot-switched via the Clash API) plus one for the default channel.
+    process_rules_on = enabled_rules(process_rules)
+    domain_rules_on = enabled_rules(domain_rules)
+    for i, rule in enumerate(process_rules_on):
+        outbounds.append(_selector(process_rule_tag(i), channel_ids, rule["channel"]))
+    for i, rule in enumerate(domain_rules_on):
+        outbounds.append(_selector(suffix_rule_tag(i), channel_ids, rule["channel"]))
+    outbounds.append(_selector(FINAL_SELECTOR, channel_ids, default_channel))
 
     dns_rules = []
     for rule in process_rules:
@@ -154,21 +235,17 @@ def build_config(settings: dict) -> dict:
     route_rules: list[dict] = [
         {"action": "sniff"},
     ]
-    for rule in process_rules:
-        if not rule.get("enabled", True):
-            continue
+    for i, rule in enumerate(process_rules_on):
         route_rules.append({
             "process_name": [rule["process"]],
             "action": "route",
-            "outbound": rule["channel"],
+            "outbound": process_rule_tag(i),
         })
-    for rule in domain_rules:
-        if not rule.get("enabled", True):
-            continue
+    for i, rule in enumerate(domain_rules_on):
         route_rules.append({
             "domain_suffix": [rule["suffix"]],
             "action": "route",
-            "outbound": rule["channel"],
+            "outbound": suffix_rule_tag(i),
         })
     # LAN/private addresses always use the physical interface unless a rule above matched.
     route_rules.append({"ip_is_private": True, "action": "route", "outbound": "direct"})
@@ -198,7 +275,7 @@ def build_config(settings: dict) -> dict:
         "outbounds": outbounds,
         "route": {
             "rules": route_rules,
-            "final": default_channel,
+            "final": FINAL_SELECTOR,
             "default_domain_resolver": dns_tag(default_channel),
         },
         "experimental": {

@@ -1,6 +1,8 @@
 """HTTP clients for the NetPilot agent and the sing-box Clash API."""
 from __future__ import annotations
 
+from urllib.parse import quote
+
 import requests
 
 from . import paths
@@ -81,6 +83,14 @@ class ClashClient:
 
     def connections(self) -> list[dict]:
         return self._get("/connections").get("connections") or []
+
+    def select_proxy(self, group: str, name: str) -> None:
+        """Switch a selector outbound via the Clash API: hot, no core restart."""
+        resp = requests.put(f"{paths.CLASH_BASE}/proxies/{quote(group, safe='')}",
+                            json={"name": name},
+                            headers={"Authorization": f"Bearer {paths.CLASH_SECRET}"},
+                            timeout=self.timeout)
+        resp.raise_for_status()
 
     def close_connection(self, conn_id: str) -> None:
         requests.delete(paths.CLASH_BASE + "/connections/" + conn_id,

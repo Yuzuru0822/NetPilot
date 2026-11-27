@@ -7,7 +7,9 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, Signal
+from PySide6.QtCore import (
+    QItemSelection, QItemSelectionModel, QObject, QRunnable, QThreadPool, QTimer, Qt, Signal,
+)
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFormLayout,
@@ -18,7 +20,7 @@ from PySide6.QtWidgets import (
 
 from . import paths, updater
 from .agent_client import AgentClient, AgentOffline, ClashClient
-from .config_builder import generate, load_settings, save_settings
+from .config_builder import generate, hot_patches, load_settings, save_settings, selection_only_change
 from .netinfo import list_adapters, list_processes
 
 def make_icon() -> QIcon:
@@ -119,6 +121,7 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self._channel_rows = []
         self.core_running = False
+        self.core_starting = False
         self.agent_online = False
         self._tasks = set()
         self._pool = QThreadPool(self)
@@ -144,6 +147,9 @@ class MainWindow(QMainWindow):
         self.conn_timer = QTimer(self)
         self.conn_timer.timeout.connect(self.refresh_connections)
         self.conn_timer.start(2000)
+        self.adapter_timer = QTimer(self)
+        self.adapter_timer.timeout.connect(self._tick_adapters)
+        self.adapter_timer.start(2000)
         self.tabs.currentChanged.connect(self._tab_changed)
         self.refresh_status()
         self.refresh_adapters()
@@ -386,7 +392,7 @@ class MainWindow(QMainWindow):
 
     # ---------- rules tab ----------
     def _build_rules_tab(self):
-        tab = QWidget()
+        self.rules_tab = tab = QWidget()
         layout = QVBoxLayout(tab)
 
         default_row = QHBoxLayout()
@@ -438,10 +444,10 @@ class MainWindow(QMainWindow):
         for btn in (add_process, add_manual, add_domain, remove, up, down):
             button_row.addWidget(btn)
         button_row.addStretch()
-        apply_btn = QPushButton("💾 保存并应用")
-        apply_btn.setStyleSheet("font-weight:bold;padding:6px 18px;")
-        apply_btn.clicked.connect(lambda: self.apply_settings())
-        button_row.addWidget(apply_btn)
+        self.apply_btn = QPushButton("💾 保存并应用")
+        self.apply_btn.setStyleSheet("font-weight:bold;padding:6px 18px;")
+        self.apply_btn.clicked.connect(lambda: self.apply_settings())
+        button_row.addWidget(self.apply_btn)
         layout.addLayout(button_row)
 
         self._fill_rule_table(self.process_table, self.settings.get("process_rules", []), "process")
@@ -635,13 +641,68 @@ class MainWindow(QMainWindow):
         if missing:
             QMessageBox.warning(self, "无法应用", "以下通道还没有绑定网卡：\n" + "\n".join(missing))
             return
-        self.settings["channels"] = channels
-        self.settings["default_channel"] = self.default_combo.currentData()
-        self.settings["process_rules"] = self._read_rule_table(self.process_table, "process")
-        self.settings["domain_rules"] = self._read_rule_table(self.domain_table, "suffix")
+        new_settings = dict(self.settings)
+        new_settings["channels"] = channels
+        new_settings["default_channel"] = self.default_combo.currentData()
+        new_settings["process_rules"] = self._read_rule_table(self.process_table, "process")
+        new_settings["domain_rules"] = self._read_rule_table(self.domain_table, "suffix")
+
+        # Hot path: only rule->channel targets (or the default channel) changed
+        # while the core is running. Switch the selector groups through the
+        # Clash API; connections stay alive and no restart is needed.
+        if (not start_only and self.core_running and not getattr(self, "core_starting", False)
+                and selection_only_change(self.settings, new_settings)):
+            def work():
+                patches = hot_patches(self.settings, new_settings)
+                for tag, member in patches:
+                    self.clash.select_proxy(tag, member)
+                return len(patches)
+
+            def done(patched):
+                self.settings = new_settings
+                save_settings(self.settings)
+                generate(self.settings)
+                self._refresh_all_combos()
+                self.statusBar().showMessage(
+                    f"已热更新：{patched} 处通道切换即时生效，现有连接不受影响。", 12000)
+                self.refresh_status()
+
+            def failed(msg):
+                answer = QMessageBox.question(
+                    self, "热更新失败",
+                    f"通过内核 API 热更新失败：{msg}\n\n"
+                    "是否改用重启分流内核的方式应用？（现有连接会中断）")
+                if answer == QMessageBox.Yes:
+                    # Settings are only persisted on the success path; persist
+                    # them now so the restart picks the new targets up.
+                    self.settings = new_settings
+                    save_settings(self.settings)
+                    generate(self.settings)
+                    self._refresh_all_combos()
+                    self._apply_with_restart(start_only=False)
+
+            self.run_task(work, done, failed)
+            return
+
+        self.settings = new_settings
         save_settings(self.settings)
-        generate()
+        generate(self.settings)
         self._refresh_all_combos()
+        self._apply_with_restart(start_only)
+
+    def _apply_with_restart(self, start_only):
+        """Save + restart/start path with visible progress while the core is
+        down (TUN bring-up can take a very long time on this machine)."""
+        label = ("正在启动分流内核" if start_only or not self.core_running
+                 else "正在重启分流内核（现有连接会中断）")
+        self.apply_btn.setEnabled(False)
+        self._apply_t0 = time.time()
+        progress = lambda: self.statusBar().showMessage(
+            f"{label}…（已等待 {time.time() - self._apply_t0:.0f} 秒）", 4000)
+        self._apply_timer = QTimer(self)
+        self._apply_timer.timeout.connect(progress)
+        self._apply_timer.start(500)
+        progress()
 
         def work():
             if self.core_running and not start_only:
@@ -649,20 +710,56 @@ class MainWindow(QMainWindow):
             return self.agent.start()
 
         def done(result):
+            self._apply_timer.stop()
+            self.apply_btn.setEnabled(True)
+            elapsed = time.time() - self._apply_t0
             message = result.get("message", "")
             if not result.get("ok", True):
                 QMessageBox.warning(self, "分流启动/重启失败", message or "未知错误")
-            self.statusBar().showMessage(("已应用: " if not start_only else "") + message.splitlines()[0], 10000)
+                return
+            self.statusBar().showMessage(
+                f"{'已启动' if start_only else '已应用'}（耗时 {elapsed:.0f} 秒）: "
+                + message.splitlines()[0], 15000)
             self.refresh_status()
 
-        self.run_task(work, done)
+        def failed(msg):
+            self._apply_timer.stop()
+            self.apply_btn.setEnabled(True)
+            self.statusBar().showMessage("操作失败: " + msg, 10000)
+
+        self.run_task(work, done, failed)
 
     # ---------- connections tab ----------
+    CONN_RATE_COLS = {4, 5, 6}  # ↓速率 / ↑速率 / 累计，按数值排序而非格式化文本
+
     def _build_connections_tab(self):
         tab = QWidget()
         self.connections_tab = tab
         layout = QVBoxLayout(tab)
-        hint = QLabel("每 2 秒自动刷新，按下载速率排序。通道列显示该连接实际使用的出口。")
+
+        controls = QHBoxLayout()
+        self.pause_btn = QPushButton("⏸ 暂停刷新")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.toggled.connect(self._set_conn_paused)
+        controls.addWidget(self.pause_btn)
+        controls.addWidget(QLabel("筛选:"))
+        self.conn_filter = QLineEdit()
+        self.conn_filter.setPlaceholderText("进程 / 目标 / 通道")
+        self.conn_filter.setClearButtonEnabled(True)
+        self.conn_filter.setMaximumWidth(220)
+        self.conn_filter.textChanged.connect(lambda _t: self._conn_view_changed())
+        controls.addWidget(self.conn_filter)
+        self.conn_rate_filter = QComboBox()
+        self.conn_rate_filter.addItems(["全部速率", "> 10 KB/s", "> 100 KB/s", "> 1 MB/s"])
+        self.conn_rate_filter.currentIndexChanged.connect(lambda _i: self._conn_view_changed())
+        controls.addWidget(self.conn_rate_filter)
+        self.sort_reset_btn = QPushButton("默认排序")
+        self.sort_reset_btn.clicked.connect(self._reset_conn_sort)
+        controls.addWidget(self.sort_reset_btn)
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        hint = QLabel("每 2 秒自动刷新，默认按进程名排序，已有连接的行保持稳定。")
         self.conn_hint = hint
         layout.addWidget(hint)
         self.conn_table = QTableWidget(0, 7)
@@ -670,8 +767,48 @@ class MainWindow(QMainWindow):
         self.conn_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.conn_table.verticalHeader().setVisible(False)
         self.conn_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        # Header clicks only move the indicator; sorting itself is done in
+        # Python before refilling, because the table is reconciled every 2s.
+        self.conn_table.horizontalHeader().setSectionsClickable(True)
+        self.conn_table.horizontalHeader().sectionClicked.connect(self._conn_header_clicked)
         layout.addWidget(self.conn_table)
+
+        self._last_rows: list[dict] = []
+        self._conn_row_ids: list[str] = []  # table row index -> connection id
+        self._conn_paused = False
+        self._conn_sort = None  # None = default stable (进程名, 目标, cid) ordering
         return tab
+
+    def _set_conn_paused(self, paused):
+        self._conn_paused = paused
+        self.pause_btn.setText("▶ 继续刷新" if paused else "⏸ 暂停刷新")
+        if paused:
+            self.conn_hint.setText("已暂停自动刷新，显示的是暂停时的快照。")
+        else:
+            # First frame after a long pause would otherwise show the average
+            # rate over the whole pause; reset baselines so rates restart at 0.
+            self._prev_conns.clear()
+            self.refresh_connections()
+
+    def _conn_header_clicked(self, col):
+        if self._conn_sort and self._conn_sort[0] == col:
+            order = (Qt.AscendingOrder if self._conn_sort[1] == Qt.DescendingOrder
+                     else Qt.DescendingOrder)
+        else:
+            order = Qt.DescendingOrder if col in self.CONN_RATE_COLS else Qt.AscendingOrder
+        self._conn_sort = (col, order)
+        self.conn_table.horizontalHeader().setSortIndicator(col, order)
+        self._conn_view_changed()
+
+    def _reset_conn_sort(self):
+        self._conn_sort = None
+        self.conn_table.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
+        self._conn_view_changed()
+
+    def _conn_view_changed(self):
+        """Filter/sort/pause-toggle interaction: re-render the cached snapshot
+        without fetching new data."""
+        self._render_connections()
 
     @staticmethod
     def _fmt_rate(value: float) -> str:
@@ -690,7 +827,7 @@ class MainWindow(QMainWindow):
         return f"{value / 1024:.1f} KB"
 
     def refresh_connections(self):
-        if not self.core_running or getattr(self, "core_starting", False) \
+        if self._conn_paused or not self.core_running or getattr(self, "core_starting", False) \
                 or self.tabs.currentWidget() is not self.connections_tab:
             return
 
@@ -703,11 +840,12 @@ class MainWindow(QMainWindow):
         self.run_task(work, self._update_connections)
 
     def _update_connections(self, connections):
+        """Fetch finished: turn the snapshot into row dicts and cache them in
+        _last_rows; rendering happens separately so that filtering, sorting and
+        the pause button can re-render the same snapshot on demand."""
         if isinstance(connections, dict) and "error" in connections:
             self.conn_hint.setText("连接读取失败：" + connections["error"])
             return
-        self.conn_hint.setText("每 2 秒自动刷新，按下载速率排序。通道列显示该连接实际使用的出口。"
-                               if connections else "当前没有活动连接。")
         if connections is None:
             return
         now = time.time()
@@ -729,38 +867,168 @@ class MainWindow(QMainWindow):
             chains = conn.get("chains") or []
             channel = next((c for c in chains if c in ids), chains[0] if chains else "?")
             rows.append({
-                "process": process, "target": target, "channel": channel,
+                "cid": cid, "process": process, "target": target, "channel": channel,
+                "channel_label": self.channel_label(channel),
                 "rule": f"{conn.get('rule', '')} {conn.get('rulePayload', '')}".strip(),
                 "down_rate": down_rate, "up_rate": up_rate, "down": down, "up": up,
             })
         for cid in list(self._prev_conns):
             if cid not in current_ids:
                 del self._prev_conns[cid]
-        rows.sort(key=lambda r: r["down_rate"] + r["up_rate"], reverse=True)
-        rows = rows[:200]
-        self.conn_table.setRowCount(len(rows))
-        for i, row in enumerate(rows):
-            values = [
-                row["process"], row["target"], self.channel_label(row["channel"]), row["rule"],
-                self._fmt_rate(row["down_rate"]), self._fmt_rate(row["up_rate"]),
-                f"{self._fmt_bytes(row['down'])} / {self._fmt_bytes(row['up'])}",
-            ]
-            for col, value in enumerate(values):
-                self.conn_table.setItem(i, col, QTableWidgetItem(value))
+        self._last_rows = rows
+        self._render_connections()
+
+    # ---------- connections rendering (filter / sort / incremental) ----------
+    def _conn_row_values(self, r: dict) -> list[str]:
+        return [
+            r["process"], r["target"], r["channel_label"], r["rule"],
+            self._fmt_rate(r["down_rate"]), self._fmt_rate(r["up_rate"]),
+            f"{self._fmt_bytes(r['down'])} / {self._fmt_bytes(r['up'])}",
+        ]
+
+    def _filtered_rows(self, rows: list[dict]) -> list[dict]:
+        text = self.conn_filter.text().strip().lower()
+        min_rate = {0: 0.0, 1: 10 * 1024, 2: 100 * 1024, 3: 1024 * 1024}[
+            self.conn_rate_filter.currentIndex()]
+        out = []
+        for r in rows:
+            if max(r["down_rate"], r["up_rate"]) < min_rate:
+                continue
+            if text and text not in r["process"].lower() \
+                    and text not in r["target"].lower() \
+                    and text not in r["channel_label"].lower():
+                continue
+            out.append(r)
+        return out
+
+    def _sorted_rows(self, visible: list[dict]) -> None:
+        if self._conn_sort:
+            col, order = self._conn_sort
+            reverse = order == Qt.DescendingOrder
+            if col in self.CONN_RATE_COLS:
+                if col == 4:
+                    key = lambda r: r["down_rate"]
+                elif col == 5:
+                    key = lambda r: r["up_rate"]
+                else:
+                    key = lambda r: r["down"] + r["up"]
+            else:
+                field = {0: "process", 1: "target", 2: "channel_label", 3: "rule"}[col]
+                key = lambda r: (r[field] or "").lower()
+            visible.sort(key=key, reverse=reverse)
+        else:
+            # Default view: stable by process name, then target, then cid so
+            # existing connections never change position between refreshes.
+            visible.sort(key=lambda r: (r["process"].lower(), r["target"], r["cid"]))
+
+    def _render_connections(self):
+        rows = self._last_rows
+        visible = self._filtered_rows(rows)
+        self._sorted_rows(visible)
+        selected = self._selected_conn_cids()
+        structured = bool(self._conn_sort) or bool(self.conn_filter.text().strip()) \
+            or self.conn_rate_filter.currentIndex() != 0
+        if structured or getattr(self, "_conn_rendered_structured", False):
+            # Full refill when the visible set/order moves with the data (user
+            # sort / filter active), and also when LEAVING such a view: the
+            # leftover row order is not the default sort order, so incremental
+            # merge-insertion alone cannot restore it.
+            self._rebuild_conn_table(visible)
+        else:
+            # Default view: incremental update — existing rows keep their
+            # position, only changed cells are touched.
+            self._reconcile_conn_table(visible)
+        self._conn_rendered_structured = structured
+        self._restore_conn_selection(selected)
+        text = (f"每 2 秒自动刷新，默认按进程名排序，已有连接的行保持稳定。"
+                f"当前 {len(visible)}/{len(rows)} 条连接。" if rows else "当前没有活动连接。")
+        if self.conn_hint.text() != text:
+            self.conn_hint.setText(text)
+
+    def _rebuild_conn_table(self, visible: list[dict]):
+        """Full refill, used when a filter or user sort is active (the visible
+        set/order changes with the data, so incremental bookkeeping buys nothing)."""
+        table = self.conn_table
+        table.setRowCount(len(visible))
+        self._conn_row_ids = [r["cid"] for r in visible]
+        for i, r in enumerate(visible):
+            for col, value in enumerate(self._conn_row_values(r)):
+                table.setItem(i, col, QTableWidgetItem(value))
+
+    def _reconcile_conn_table(self, visible: list[dict]):
+        """Incremental: remove dead rows, merge-insert new ones in stable
+        position, then update only the cells whose text changed."""
+        table = self.conn_table
+        desired_ids = {r["cid"] for r in visible}
+        for row in range(len(self._conn_row_ids) - 1, -1, -1):
+            if self._conn_row_ids[row] not in desired_ids:
+                table.removeRow(row)
+                del self._conn_row_ids[row]
+        # Surviving rows keep their relative order (sort keys are immutable),
+        # so a merge over desired order only ever inserts.
+        pos = 0
+        for r in visible:
+            if pos < len(self._conn_row_ids) and self._conn_row_ids[pos] == r["cid"]:
+                pos += 1
+                continue
+            table.insertRow(pos)
+            self._conn_row_ids.insert(pos, r["cid"])
+            for col, value in enumerate(self._conn_row_values(r)):
+                table.setItem(pos, col, QTableWidgetItem(value))
+            pos += 1
+        for i, r in enumerate(visible):
+            for col, value in enumerate(self._conn_row_values(r)):
+                item = table.item(i, col)
+                if item is None:
+                    table.setItem(i, col, QTableWidgetItem(value))
+                elif item.text() != value:
+                    item.setText(value)
+
+    def _selected_conn_cids(self) -> list[str]:
+        rows = sorted({i.row() for i in self.conn_table.selectedIndexes()})
+        return [self._conn_row_ids[r] for r in rows if 0 <= r < len(self._conn_row_ids)]
+
+    def _restore_conn_selection(self, cids: list[str]):
+        if not cids:
+            return
+        selection = QItemSelection()
+        model = self.conn_table.model()
+        for cid in cids:
+            if cid in self._conn_row_ids:
+                row = self._conn_row_ids.index(cid)
+                selection.select(model.index(row, 0), model.index(row, 6))
+        if not selection.isEmpty():
+            self.conn_table.selectionModel().select(
+                selection, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+
+    def _tick_adapters(self):
+        """Refresh the rules-tab adapter status every 2s while that tab is shown."""
+        if self.tabs.currentWidget() is self.rules_tab:
+            self.refresh_adapters()
 
     def refresh_adapters(self):
         def work():
             return list_adapters()
 
         def done(adapters):
+            # Skip the whole update (especially the combo rebuilds, which would
+            # wipe text being typed) while the adapter list is unchanged.
+            signature = [(a["name"], a["is_up"], tuple(a["ipv4"]), a["speed_mbps"])
+                         for a in adapters]
+            if signature == getattr(self, "_adapter_sig", None):
+                return
+            self._adapter_sig = signature
             self._adapters = adapters
             names = [a["name"] for a in adapters]
+            names_changed = names != getattr(self, "_adapter_names", None)
+            self._adapter_names = names
             for row in self._channel_rows:
                 combo = row["iface_combo"]
-                current = combo.currentText()
-                combo.clear()
-                combo.addItems(names)
-                combo.setCurrentText(current)
+                if names_changed and not combo.hasFocus():
+                    current = combo.currentText()
+                    combo.clear()
+                    combo.addItems(names)
+                    combo.setCurrentText(current)
             for i, row in enumerate(self._channel_rows):
                 bound = row["iface_combo"].currentText()
                 match = next((a for a in adapters if a["name"] == bound), None)
@@ -770,7 +1038,11 @@ class MainWindow(QMainWindow):
                     text = "⚪ 离线/未找到"
                 else:
                     text = "未绑定"
-                self.channel_table.setItem(i, 2, QTableWidgetItem(text))
+                item = self.channel_table.item(i, 2)
+                if item is None:
+                    self.channel_table.setItem(i, 2, QTableWidgetItem(text))
+                elif item.text() != text:
+                    item.setText(text)
 
         self.run_task(work, done)
 
